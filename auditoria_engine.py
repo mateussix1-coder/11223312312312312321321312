@@ -23,8 +23,8 @@ RE_CTE_NUM = re.compile(r"^\d{4,6}$")
 RE_DATA_ATUA = re.compile(r"^\d{2}/\d{2}/\d{2}\s+\d{2}:\d{2}$")
 RE_DATA_GW = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 RE_PLACA = re.compile(r"^[A-Z]{3}\d[A-Z0-9]\d{2}$|^[A-Z]{3}\d{4}$")
-RE_MONEY_BR = re.compile(r"^-?\d{1,3}(?:\.\d{3})*,\d{2}$|^-?\d+,\d{2}$")
-MONEY_RE = re.compile(r"-?\d{1,3}(?:\.\d{3})*,\d{2}|-?\d+,\d{2}")
+RE_MONEY_BR = re.compile(r"^-?(?:\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d+\.\d{2})$")
+MONEY_RE = re.compile(r"-?(?:\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d+\.\d{2})")
 RE_PESO_TON = re.compile(r"^\d{1,3},\d{3}$")
 RE_PERCENT = re.compile(r"^-?\d{1,3},\d{2}%$")
 MAX_PDF_PAGE_COUNT = 300
@@ -114,6 +114,17 @@ def normalizar_cte(value) -> Optional[str]:
         return None
 
     return str(numero)
+
+
+def _selecionar_valores_gw(valores: List[Decimal]) -> tuple[Optional[Decimal], Optional[Decimal]]:
+    nao_zero = [valor for valor in valores if valor != Decimal("0.00")]
+    if len(nao_zero) >= 2:
+        return nao_zero[0], nao_zero[-1]
+    if len(valores) >= 3:
+        return valores[1], valores[-3]
+    if len(valores) >= 2:
+        return valores[0], valores[-1]
+    return None, None
 
 
 def _extrair_linhas_pdfplumber(caminho_pdf):
@@ -412,14 +423,14 @@ def _extrair_gw_linha_unica(linhas_pdf) -> Dict[str, Dict[str, Any]]:
         if not cte:
             continue
 
-        valores = MONEY_RE.findall(linha)
+        valores = [parse_money_br(item) for item in MONEY_RE.findall(linha)]
+        valores = [valor for valor in valores if valor is not None]
 
         if len(valores) < 3:
             continue
 
         # Empresa B usa "Valor frete" do GW. Não usar "Frete tab." porque pode vir líquido/descontado por impostos.
-        empresa_b = parse_money_br(valores[1])
-        motorista_b = parse_money_br(valores[-3])
+        empresa_b, motorista_b = _selecionar_valores_gw(valores)
 
         if empresa_b is None or motorista_b is None:
             continue
@@ -465,14 +476,15 @@ def _finalizar_bloco_gw(registros, bloco):
             if valor is not None:
                 valores_antes_cte.append(valor)
 
-    if not cte or len(valores_antes_cte) < 2:
+    empresa_b, motorista_b = _selecionar_valores_gw(valores_antes_cte)
+    if not cte or empresa_b is None or motorista_b is None:
         return
 
     registros[cte] = {
         "cte": cte,
         # Empresa B usa "Valor frete" do GW. Não usar "Frete tab." porque pode vir líquido/descontado por impostos.
-        "empresa": valores_antes_cte[1],
-        "motorista": valores_antes_cte[-1],
+        "empresa": empresa_b,
+        "motorista": motorista_b,
         "pagina": pagina_cte,
         "margem": None,
         "raw": " | ".join(linha for _, linha in bloco["linhas"]),
