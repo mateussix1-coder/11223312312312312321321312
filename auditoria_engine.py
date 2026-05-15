@@ -7,7 +7,6 @@ import json
 import os
 import re
 import tempfile
-import unicodedata
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
@@ -23,17 +22,12 @@ RE_CTE_NUM = re.compile(r"^\d{4,6}$")
 RE_DATA_ATUA = re.compile(r"^\d{2}/\d{2}/\d{2}\s+\d{2}:\d{2}$")
 RE_DATA_GW = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 RE_PLACA = re.compile(r"^[A-Z]{3}\d[A-Z0-9]\d{2}$|^[A-Z]{3}\d{4}$")
-RE_MONEY_BR = re.compile(r"^-?(?:\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d+\.\d{2})$")
-MONEY_RE = re.compile(r"-?(?:\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d+\.\d{2})")
+RE_MONEY_BR = re.compile(r"^-?\d{1,3}(?:\.\d{3})*,\d{2}$|^-?\d+,\d{2}$")
+MONEY_RE = re.compile(r"-?\d{1,3}(?:\.\d{3})*,\d{2}|-?\d+,\d{2}")
 RE_PESO_TON = re.compile(r"^\d{1,3},\d{3}$")
 RE_PERCENT = re.compile(r"^-?\d{1,3},\d{2}%$")
 MAX_PDF_PAGE_COUNT = 300
 MAX_HISTORY_ENTRIES = 100
-
-LAST_PARSE_DEBUG = {
-    "ATUA": {},
-    "GW": {},
-}
 
 
 def parse_money_br(value) -> Optional[Decimal]:
@@ -59,16 +53,10 @@ def parse_money_br(value) -> Optional[Decimal]:
         return None
 
     # BR: ponto = milhar, vírgula = decimal
-    if "," in text and "." in text:
-        if text.rfind(",") > text.rfind("."):
-            text = text.replace(".", "")
-            text = text.replace(",", ".")
-        else:
-            text = text.replace(",", "")
-    elif "," in text:
+    if "," in text:
         text = text.replace(".", "")
         text = text.replace(",", ".")
-    elif "." in text:
+    else:
         text = text.replace(",", "")
 
     try:
@@ -111,26 +99,15 @@ def normalizar_cte(value) -> Optional[str]:
 
     text = str(value).strip()
 
-    if not re.fullmatch(r"\d{1,6}", text):
+    if not re.fullmatch(r"\d{4,6}", text):
         return None
 
     numero = int(text)
 
-    if numero < 1 or numero > 999999:
+    if numero < 1000 or numero > 999999:
         return None
 
     return str(numero)
-
-
-def _selecionar_valores_gw(valores: List[Decimal]) -> tuple[Optional[Decimal], Optional[Decimal]]:
-    nao_zero = [valor for valor in valores if valor != Decimal("0.00")]
-    if len(nao_zero) >= 2:
-        return nao_zero[0], nao_zero[-1]
-    if len(valores) >= 3:
-        return valores[1], valores[-3]
-    if len(valores) >= 2:
-        return valores[0], valores[-1]
-    return None, None
 
 
 def _extrair_linhas_pdfplumber(caminho_pdf):
@@ -152,76 +129,10 @@ def _extrair_linhas_pdfplumber(caminho_pdf):
     return linhas
 
 
-def extrair_linhas_pymupdf(caminho_pdf):
-    import fitz
-
-    linhas = []
-    with fitz.open(str(caminho_pdf)) as doc:
-        total_paginas = len(doc)
-        if total_paginas == 0:
-            raise ValueError("O PDF enviado nao possui paginas legiveis.")
-        if total_paginas > MAX_PDF_PAGE_COUNT:
-            raise ValueError(
-                f"O PDF possui {total_paginas} paginas e excede o limite de {MAX_PDF_PAGE_COUNT} paginas."
-            )
-        for page_index, page in enumerate(doc, start=1):
-            texto = page.get_text("text") or ""
-            for linha in texto.splitlines():
-                linha = " ".join(str(linha).split())
-                if linha:
-                    linhas.append((page_index, linha))
-    return linhas
-
-
-def _normalizar_texto_busca(texto: str) -> str:
-    texto = unicodedata.normalize("NFKD", texto or "")
-    texto = "".join(ch for ch in texto if not unicodedata.combining(ch))
-    return texto.lower()
-
-
-def _detectar_cabecalho_pr(linhas_pdf) -> Optional[str]:
-    texto = _normalizar_texto_busca("\n".join(linha for _, linha in linhas_pdf[:80]))
-    if "relatorio detalhado do ctrc" in texto or ("detalhado do ctrc" in texto and "ct" in texto):
-        return "ATUA PR"
-    if "analise de cte/nfs com impostos" in texto or "cte/nfs com impostos" in texto:
-        return "GW PR"
-    return None
-
-
-def _detectar_formato_pr(linhas_pdf) -> Optional[str]:
-    formato = _detectar_cabecalho_pr(linhas_pdf)
-    if formato:
-        return formato
-    if any(RE_ATUA_PR_INICIO.match(" ".join(str(linha).split())) for _, linha in linhas_pdf[:200]):
-        return "ATUA PR"
-    if any(RE_GW_PR_INICIO.match(" ".join(str(linha).split())) for _, linha in linhas_pdf[:200]):
-        return "GW PR"
-    return None
-
-
-def _registrar_debug_parser(tipo: str, formato: str, metodo: str, registros, linhas_pdf):
-    ordenados = [registros[cte] for cte in sorted(registros.keys(), key=lambda x: int(x))[:10]]
-    LAST_PARSE_DEBUG[tipo] = {
-        "formato_detectado": formato,
-        "metodo_usado": metodo,
-        "quantidade_ctes": len(registros),
-        "primeiros_10_ctes": [r["cte"] for r in ordenados],
-        "primeiros_10_valores_empresa": [r["empresa"] for r in ordenados],
-        "primeiros_10_valores_motorista": [r["motorista"] for r in ordenados],
-        "primeiras_10_linhas_reais_extraidas": [linha for _, linha in linhas_pdf[:10]],
-    }
-
-
 # Regex para linha de CTE do ATUA:  "1752 CT ..."
 RE_ATUA_LINHA = re.compile(r"^\s*(\d{4,6})\s+CT\b")
 # Regex para linha de CTE do GW: "001752 01/04/2026 ..."
 RE_GW_LINHA = re.compile(r"^\s*(\d{4,6})\s+\d{2}/\d{2}/\d{4}\b")
-RE_ATUA_PR_INICIO = re.compile(r"^\s*(\d{1,6})\s+CT\s+\d{2}/\d{2}/\d{2}\s+\d{2}:\d{2}\s+")
-RE_GW_PR_INICIO = re.compile(r"^\s*(\d{6})\s+\d{2}/\d{2}/\d{4}\s+")
-RE_PLACA_PR = re.compile(r"\b(?:[A-Z]{3}[0-9][A-Z0-9][0-9]{2}|[A-Z]{3}[0-9]{4})\b")
-RE_NUM_BR_PR = re.compile(r"-?\d{1,3}(?:\.\d{3})*,\d{2,3}")
-RE_MONEY_GW_PR = re.compile(r"-?\d{1,3}(?:\.\d{3})*,\d{2}(?!%)")
-RE_MARGEM_GW_PR = re.compile(r"-?\d{1,3},\d{2}%")
 
 ATUA_HEADER_LINES = {
     "Numero",
@@ -345,80 +256,13 @@ def _extrair_atua_multilinha(linhas_pdf) -> Dict[str, Dict[str, Any]]:
     return registros
 
 
-def extrair_atua_pr(caminho_pdf, linhas_pdf=None) -> Dict[str, Dict[str, Any]]:
-    linhas_pdf = linhas_pdf if linhas_pdf is not None else extrair_linhas_pymupdf(caminho_pdf)
-    registros = {}
-
-    for page_num, linha in linhas_pdf:
-        linha = " ".join(str(linha).split())
-        m = RE_ATUA_PR_INICIO.match(linha)
-        if not m:
-            continue
-
-        cte = normalizar_cte(m.group(1))
-        if not cte:
-            continue
-
-        placas = list(RE_PLACA_PR.finditer(linha))
-        if not placas:
-            continue
-
-        resto = linha[placas[-1].end():]
-        nums = RE_NUM_BR_PR.findall(resto)
-        if len(nums) < 3:
-            continue
-
-        empresa_a = parse_money_br(nums[1])
-        motorista_a = parse_money_br(nums[2])
-        if empresa_a is None or motorista_a is None:
-            continue
-
-        registros[cte] = {
-            "cte": cte,
-            "empresa": empresa_a,
-            "motorista": motorista_a,
-            "pagina": page_num,
-            "margem": None,
-            "raw": linha,
-        }
-
-    return registros
-
-
 def extrair_atua_por_blocos(caminho_pdf) -> Dict[str, Dict[str, Any]]:
     # Reutiliza a mesma extração textual para evitar varrer o PDF duas vezes.
     linhas_pdf = _extrair_linhas_pdfplumber(caminho_pdf)
-    formato_cabecalho = _detectar_cabecalho_pr(linhas_pdf)
-    if formato_cabecalho == "ATUA PR":
-        linhas_pr = extrair_linhas_pymupdf(caminho_pdf)
-        registros = extrair_atua_pr(caminho_pdf, linhas_pr)
-        linhas_debug = linhas_pr
-        if not registros:
-            registros = extrair_atua_pr(caminho_pdf, linhas_pdf)
-            linhas_debug = linhas_pdf
-        _registrar_debug_parser("ATUA", formato_cabecalho, "parser PR fallback", registros, linhas_debug)
-        return registros
-
     registros = _extrair_atua_linha_unica(linhas_pdf)
     if registros:
-        formato = _detectar_cabecalho_pr(linhas_pdf) or "ATUA legado"
-        _registrar_debug_parser("ATUA", formato, "parser atual", registros, linhas_pdf)
         return registros
-    registros = _extrair_atua_multilinha(linhas_pdf)
-    if registros:
-        formato = _detectar_cabecalho_pr(linhas_pdf) or "ATUA legado"
-        _registrar_debug_parser("ATUA", formato, "parser atual", registros, linhas_pdf)
-        return registros
-
-    linhas_pr = extrair_linhas_pymupdf(caminho_pdf)
-    formato = _detectar_formato_pr(linhas_pr)
-    if formato == "ATUA PR":
-        registros = extrair_atua_pr(caminho_pdf, linhas_pr)
-        _registrar_debug_parser("ATUA", formato, "parser PR fallback", registros, linhas_pr)
-        return registros
-
-    _registrar_debug_parser("ATUA", formato or "nao detectado", "parser atual", registros, linhas_pr)
-    return registros
+    return _extrair_atua_multilinha(linhas_pdf)
 
 
 def _extrair_gw_linha_unica(linhas_pdf) -> Dict[str, Dict[str, Any]]:
@@ -431,14 +275,14 @@ def _extrair_gw_linha_unica(linhas_pdf) -> Dict[str, Dict[str, Any]]:
         if not cte:
             continue
 
-        valores = [parse_money_br(item) for item in MONEY_RE.findall(linha)]
-        valores = [valor for valor in valores if valor is not None]
+        valores = MONEY_RE.findall(linha)
 
-        if len(valores) < 2:
+        if len(valores) < 3:
             continue
 
         # Empresa B usa "Valor frete" do GW. Não usar "Frete tab." porque pode vir líquido/descontado por impostos.
-        empresa_b, motorista_b = _selecionar_valores_gw(valores)
+        empresa_b = parse_money_br(valores[1])
+        motorista_b = parse_money_br(valores[-3])
 
         if empresa_b is None or motorista_b is None:
             continue
@@ -484,15 +328,14 @@ def _finalizar_bloco_gw(registros, bloco):
             if valor is not None:
                 valores_antes_cte.append(valor)
 
-    empresa_b, motorista_b = _selecionar_valores_gw(valores_antes_cte)
-    if not cte or empresa_b is None or motorista_b is None:
+    if not cte or len(valores_antes_cte) < 2:
         return
 
     registros[cte] = {
         "cte": cte,
         # Empresa B usa "Valor frete" do GW. Não usar "Frete tab." porque pode vir líquido/descontado por impostos.
-        "empresa": empresa_b,
-        "motorista": motorista_b,
+        "empresa": valores_antes_cte[1],
+        "motorista": valores_antes_cte[-1],
         "pagina": pagina_cte,
         "margem": None,
         "raw": " | ".join(linha for _, linha in bloco["linhas"]),
@@ -519,90 +362,13 @@ def _extrair_gw_multilinha(linhas_pdf) -> Dict[str, Dict[str, Any]]:
     return registros
 
 
-def extrair_gw_pr(caminho_pdf, linhas_pdf=None) -> Dict[str, Dict[str, Any]]:
-    linhas_pdf = linhas_pdf if linhas_pdf is not None else extrair_linhas_pymupdf(caminho_pdf)
-    registros = {}
-
-    for idx, (page_num, linha) in enumerate(linhas_pdf):
-        linha = " ".join(str(linha).split())
-        m = RE_GW_PR_INICIO.match(linha)
-        if not m:
-            continue
-
-        cte = normalizar_cte(m.group(1))
-        if not cte:
-            continue
-
-        valores_txt = RE_MONEY_GW_PR.findall(linha)
-        if len(valores_txt) < 2:
-            continue
-
-        if len(valores_txt) >= 10:
-            empresa_txt = valores_txt[1]
-            motorista_txt = valores_txt[-2]
-        else:
-            empresa_txt = valores_txt[0]
-            motorista_txt = valores_txt[-1]
-
-        empresa_b = parse_money_br(empresa_txt)
-        motorista_b = parse_money_br(motorista_txt)
-        if empresa_b is None or motorista_b is None:
-            continue
-
-        margem = None
-        for j in range(idx, min(idx + 4, len(linhas_pdf))):
-            linha_pct = " ".join(str(linhas_pdf[j][1]).split())
-            pct = RE_MARGEM_GW_PR.findall(linha_pct)
-            if pct:
-                margem = pct[-1]
-                break
-
-        registros[cte] = {
-            "cte": cte,
-            "empresa": empresa_b,
-            "motorista": motorista_b,
-            "pagina": page_num,
-            "margem": margem,
-            "raw": linha,
-        }
-
-    return registros
-
-
 def extrair_gw_por_blocos(caminho_pdf) -> Dict[str, Dict[str, Any]]:
     # Reutiliza a mesma extração textual para evitar varrer o PDF duas vezes.
     linhas_pdf = _extrair_linhas_pdfplumber(caminho_pdf)
-    formato_cabecalho = _detectar_cabecalho_pr(linhas_pdf)
-    if formato_cabecalho == "GW PR":
-        linhas_pr = extrair_linhas_pymupdf(caminho_pdf)
-        registros = extrair_gw_pr(caminho_pdf, linhas_pr)
-        linhas_debug = linhas_pr
-        if not registros:
-            registros = extrair_gw_pr(caminho_pdf, linhas_pdf)
-            linhas_debug = linhas_pdf
-        _registrar_debug_parser("GW", formato_cabecalho, "parser PR fallback", registros, linhas_debug)
-        return registros
-
     registros = _extrair_gw_linha_unica(linhas_pdf)
     if registros:
-        formato = _detectar_cabecalho_pr(linhas_pdf) or "GW legado"
-        _registrar_debug_parser("GW", formato, "parser atual", registros, linhas_pdf)
         return registros
-    registros = _extrair_gw_multilinha(linhas_pdf)
-    if registros:
-        formato = _detectar_cabecalho_pr(linhas_pdf) or "GW legado"
-        _registrar_debug_parser("GW", formato, "parser atual", registros, linhas_pdf)
-        return registros
-
-    linhas_pr = extrair_linhas_pymupdf(caminho_pdf)
-    formato = _detectar_formato_pr(linhas_pr)
-    if formato == "GW PR":
-        registros = extrair_gw_pr(caminho_pdf, linhas_pr)
-        _registrar_debug_parser("GW", formato, "parser PR fallback", registros, linhas_pr)
-        return registros
-
-    _registrar_debug_parser("GW", formato or "nao detectado", "parser atual", registros, linhas_pr)
-    return registros
+    return _extrair_gw_multilinha(linhas_pdf)
 
 
 def ler_atua(caminho_pdf):
@@ -793,6 +559,12 @@ def gerar_resumo_df(df: pd.DataFrame) -> dict:
 def validar_integridade_basica(registros_a, registros_b):
     erros = []
 
+    if len(registros_a) < 10:
+        erros.append(f"ATUA com poucos CTEs lidos: {len(registros_a)}")
+
+    if len(registros_b) < 10:
+        erros.append(f"GW com poucos CTEs lidos: {len(registros_b)}")
+
     if registros_a:
         zerados_a = sum(1 for r in registros_a.values() if r["empresa"] == 0 or r["motorista"] == 0)
         if zerados_a > len(registros_a) * Decimal("0.20"):
@@ -826,20 +598,6 @@ def gerar_debug(registros_a, registros_b):
         return saida
 
     return {
-        "ATUA - formato detectado": LAST_PARSE_DEBUG.get("ATUA", {}).get("formato_detectado"),
-        "ATUA - metodo usado": LAST_PARSE_DEBUG.get("ATUA", {}).get("metodo_usado"),
-        "ATUA - quantidade de CTEs": LAST_PARSE_DEBUG.get("ATUA", {}).get("quantidade_ctes", len(registros_a)),
-        "ATUA - primeiros 10 CTEs": LAST_PARSE_DEBUG.get("ATUA", {}).get("primeiros_10_ctes", []),
-        "ATUA - primeiros 10 valores empresa": LAST_PARSE_DEBUG.get("ATUA", {}).get("primeiros_10_valores_empresa", []),
-        "ATUA - primeiros 10 valores motorista": LAST_PARSE_DEBUG.get("ATUA", {}).get("primeiros_10_valores_motorista", []),
-        "ATUA - primeiras 10 linhas reais extraidas": LAST_PARSE_DEBUG.get("ATUA", {}).get("primeiras_10_linhas_reais_extraidas", []),
-        "GW - formato detectado": LAST_PARSE_DEBUG.get("GW", {}).get("formato_detectado"),
-        "GW - metodo usado": LAST_PARSE_DEBUG.get("GW", {}).get("metodo_usado"),
-        "GW - quantidade de CTEs": LAST_PARSE_DEBUG.get("GW", {}).get("quantidade_ctes", len(registros_b)),
-        "GW - primeiros 10 CTEs": LAST_PARSE_DEBUG.get("GW", {}).get("primeiros_10_ctes", []),
-        "GW - primeiros 10 valores empresa": LAST_PARSE_DEBUG.get("GW", {}).get("primeiros_10_valores_empresa", []),
-        "GW - primeiros 10 valores motorista": LAST_PARSE_DEBUG.get("GW", {}).get("primeiros_10_valores_motorista", []),
-        "GW - primeiras 10 linhas reais extraidas": LAST_PARSE_DEBUG.get("GW", {}).get("primeiras_10_linhas_reais_extraidas", []),
         "ATUA - Top 10": top(registros_a),
         "GW - Top 10": top(registros_b),
     }
@@ -873,18 +631,15 @@ def testar_parser_basico(caminho_atua, caminho_gw):
     a = resultado["registros_a"]
     b = resultado["registros_b"]
 
-    assert len(a) == 10
-    assert len(b) == 10
-    assert a["1751"]["empresa"] == Decimal("1000.00")
-    assert a["1751"]["motorista"] == Decimal("1000.35")
-    assert b["1751"]["empresa"] == Decimal("1000.00")
-    assert b["1751"]["motorista"] == Decimal("1000.40")
-    assert a["1760"]["empresa"] == Decimal("1090.00")
-    assert a["1760"]["motorista"] == Decimal("1090.35")
-    assert b["1760"]["empresa"] == Decimal("1090.00")
-    assert b["1760"]["motorista"] == Decimal("1090.40")
-    assert resultado["resumo"]["total_analisado"] == 10
-    assert all(linha["Status"] == "OK por arredondamento" for linha in resultado["linhas"])
+    assert a["1752"]["empresa"] == Decimal("23919.00")
+    assert a["1752"]["motorista"] == Decimal("24839.65")
+    assert b["1752"]["empresa"] == Decimal("23919.00")
+    assert b["1752"]["motorista"] == Decimal("24839.88")
+
+    assert a["1753"]["empresa"] == Decimal("12892.50")
+    assert a["1753"]["motorista"] == Decimal("13388.62")
+    assert b["1753"]["empresa"] == Decimal("12892.50")
+    assert b["1753"]["motorista"] == Decimal("12892.50")
 
     print("Parser OK.")
     print(resultado["resumo"])
